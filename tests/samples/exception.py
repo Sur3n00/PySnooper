@@ -22,6 +22,7 @@ def main():
 
 
 expected_output = '''
+Source path:... Whatever
 12:18:08.017782 call        17 def main():
 12:18:08.018142 line        18     try:
 12:18:08.018181 line        19         bar()
@@ -45,4 +46,5 @@ TypeError: bad
 12:18:08.018787 line        21         pass
 12:18:08.018813 return      21         pass
 Return value:.. None
+Elapsed time: 00:00:00.000885
 '''

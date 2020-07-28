@@ -4,6 +4,7 @@
 import functools
 import inspect
 import opcode
+import os
 import sys
 import re
 import collections
@@ -21,16 +22,19 @@ if pycompat.PY2:
 ipython_filename_pattern = re.compile('^<ipython-input-([0-9]+)-.*>$')
 
 
-def get_local_reprs(frame, watch=(), custom_repr=()):
+def get_local_reprs(frame, watch=(), custom_repr=(), max_length=None, normalize=False):
     code = frame.f_code
-    vars_order = code.co_varnames + code.co_cellvars + code.co_freevars + tuple(frame.f_locals.keys())
+    vars_order = (code.co_varnames + code.co_cellvars + code.co_freevars +
+                  tuple(frame.f_locals.keys()))
 
-    result_items = [(key, utils.get_shortish_repr(value, custom_repr=custom_repr)) for key, value in frame.f_locals.items()]
+    result_items = [(key, utils.get_shortish_repr(value, custom_repr,
+                                                  max_length, normalize))
+                    for key, value in frame.f_locals.items()]
     result_items.sort(key=lambda key_value: vars_order.index(key_value[0]))
     result = collections.OrderedDict(result_items)
 
     for variable in watch:
-        result.update(sorted(variable.items(frame)))
+        result.update(sorted(variable.items(frame, normalize)))
     return result
 
 
@@ -39,16 +43,16 @@ class UnavailableSource(object):
         return u'SOURCE IS UNAVAILABLE'
 
 
-source_cache = {}
+source_and_path_cache = {}
 
 
-def get_source_from_frame(frame):
+def get_path_and_source_from_frame(frame):
     globs = frame.f_globals or {}
     module_name = globs.get('__name__')
     file_name = frame.f_code.co_filename
     cache_key = (module_name, file_name)
     try:
-        return source_cache[cache_key]
+        return source_and_path_cache[cache_key]
     except KeyError:
         pass
     loader = globs.get('__loader__')
@@ -79,7 +83,9 @@ def get_source_from_frame(frame):
                     source = fp.read().splitlines()
             except utils.file_reading_errors:
                 pass
-    if source is None:
+    if not source:
+        # We used to check `if source is None` but I found a rare bug where it
+        # was empty, but not `None`, so now we check `if not source`.
         source = UnavailableSource()
 
     # If we just read the source from a file, or if the loader did not
@@ -97,8 +103,9 @@ def get_source_from_frame(frame):
         source = [pycompat.text_type(sline, encoding, 'replace') for sline in
                   source]
 
-    source_cache[cache_key] = source
-    return source
+    result = (file_name, source)
+    source_and_path_cache[cache_key] = result
+    return result
 
 
 def get_write_function(output, overwrite):
@@ -139,7 +146,7 @@ class FileWriter(object):
 
 
 thread_global = threading.local()
-
+DISABLED = bool(os.getenv('PYSNOOPER_DISABLED', ''))
 
 class Tracer:
     '''
@@ -181,20 +188,24 @@ class Tracer:
 
     Customize how values are represented as strings::
 
-        @pysnooper.snoop(custom_repr=((type1, custom_repr_func1), (condition2, custom_repr_func2), ...))
+        @pysnooper.snoop(custom_repr=((type1, custom_repr_func1),
+                         (condition2, custom_repr_func2), ...))
+
+    Variables and exceptions get truncated to 100 characters by default. You
+    can customize that:
+
+        @pysnooper.snoop(max_variable_length=200)
+
+    You can also use `max_variable_length=None` to never truncate them.
+
+    Show timestamps relative to start time rather than wall time::
+
+        @pysnooper.snoop(relative_time=True)
 
     '''
-    def __init__(
-            self,
-            output=None,
-            watch=(),
-            watch_explode=(),
-            depth=1,
-            prefix='',
-            overwrite=False,
-            thread_info=False,
-            custom_repr=(),
-    ):
+    def __init__(self, output=None, watch=(), watch_explode=(), depth=1,
+                 prefix='', overwrite=False, thread_info=False, custom_repr=(),
+                 max_variable_length=100, normalize=False, relative_time=False):
         self._write = get_write_function(output, overwrite)
 
         self.watch = [
@@ -205,6 +216,7 @@ class Tracer:
              for v in utils.ensure_tuple(watch_explode)
         ]
         self.frame_to_local_reprs = {}
+        self.start_times = {}
         self.depth = depth
         self.prefix = prefix
         self.thread_info = thread_info
@@ -213,9 +225,36 @@ class Tracer:
         self.target_codes = set()
         self.target_frames = set()
         self.thread_local = threading.local()
+        if len(custom_repr) == 2 and not all(isinstance(x,
+                      pycompat.collections_abc.Iterable) for x in custom_repr):
+            custom_repr = (custom_repr,)
         self.custom_repr = custom_repr
+        self.last_source_path = None
+        self.max_variable_length = max_variable_length
+        self.normalize = normalize
+        self.relative_time = relative_time
 
-    def __call__(self, function):
+    def __call__(self, function_or_class):
+        if DISABLED:
+            return function_or_class
+
+        if inspect.isclass(function_or_class):
+            return self._wrap_class(function_or_class)
+        else:
+            return self._wrap_function(function_or_class)
+
+    def _wrap_class(self, cls):
+        for attr_name, attr in cls.__dict__.items():
+            # Coroutines are functions, but snooping them is not supported
+            # at the moment
+            if pycompat.iscoroutinefunction(attr):
+                continue
+
+            if inspect.isfunction(attr):
+                setattr(cls, attr_name, self._wrap_function(attr))
+        return cls
+
+    def _wrap_function(self, function):
         self.target_codes.add(function.__code__)
 
         @functools.wraps(function)
@@ -239,7 +278,8 @@ class Tracer:
                     method, incoming = gen.throw, e
 
         if pycompat.iscoroutinefunction(function):
-            # return decorate(function, coroutine_wrapper)
+            raise NotImplementedError
+        if pycompat.isasyncgenfunction(function):
             raise NotImplementedError
         elif inspect.isgeneratorfunction(function):
             return generator_wrapper
@@ -251,21 +291,40 @@ class Tracer:
         self._write(s)
 
     def __enter__(self):
+        if DISABLED:
+            return
         calling_frame = inspect.currentframe().f_back
         if not self._is_internal_frame(calling_frame):
             calling_frame.f_trace = self.trace
             self.target_frames.add(calling_frame)
 
-        stack = self.thread_local.__dict__.setdefault('original_trace_functions', [])
+        stack = self.thread_local.__dict__.setdefault(
+            'original_trace_functions', []
+        )
         stack.append(sys.gettrace())
+        self.start_times[calling_frame] = datetime_module.datetime.now()
         sys.settrace(self.trace)
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
+        if DISABLED:
+            return
         stack = self.thread_local.original_trace_functions
         sys.settrace(stack.pop())
         calling_frame = inspect.currentframe().f_back
         self.target_frames.discard(calling_frame)
         self.frame_to_local_reprs.pop(calling_frame, None)
+
+        ### Writing elapsed time: #############################################
+        #                                                                     #
+        start_time = self.start_times.pop(calling_frame)
+        duration = datetime_module.datetime.now() - start_time
+        elapsed_time_string = pycompat.timedelta_format(duration)
+        indent = ' ' * 4 * (thread_global.depth + 1)
+        self.write(
+            '{indent}Elapsed time: {elapsed_time_string}'.format(**locals())
+        )
+        #                                                                     #
+        ### Finished writing elapsed time. ####################################
 
     def _is_internal_frame(self, frame):
         return frame.f_code.co_filename == Tracer.__enter__.__code__.co_filename
@@ -275,7 +334,6 @@ class Tracer:
         self.thread_info_padding = max(self.thread_info_padding,
                                        current_thread_len)
         return thread_info.ljust(self.thread_info_padding)
-
 
     def trace(self, frame, event, arg):
 
@@ -312,11 +370,53 @@ class Tracer:
         #                                                                     #
         ### Finished checking whether we should trace this line. ##############
 
+        ### Making timestamp: #################################################
+        #                                                                     #
+        if self.normalize:
+            timestamp = ' ' * 15
+        elif self.relative_time:
+            try:
+                start_time = self.start_times[frame]
+            except KeyError:
+                start_time = self.start_times[frame] = \
+                                                 datetime_module.datetime.now()
+            duration = datetime_module.datetime.now() - start_time
+            timestamp = pycompat.timedelta_format(duration)
+        else:
+            timestamp = pycompat.time_isoformat(
+                datetime_module.datetime.now().time(),
+                timespec='microseconds'
+            )
+        #                                                                     #
+        ### Finished making timestamp. ########################################
+
+        line_no = frame.f_lineno
+        source_path, source = get_path_and_source_from_frame(frame)
+        source_path = source_path if not self.normalize else os.path.basename(source_path)
+        if self.last_source_path != source_path:
+            self.write(u'{indent}Source path:... {source_path}'.
+                       format(**locals()))
+            self.last_source_path = source_path
+        source_line = source[line_no - 1]
+        thread_info = ""
+        if self.thread_info:
+            if self.normalize:
+                raise NotImplementedError("normalize is not supported with "
+                                          "thread_info")
+            current_thread = threading.current_thread()
+            thread_info = "{ident}-{name} ".format(
+                ident=current_thread.ident, name=current_thread.getName())
+        thread_info = self.set_thread_info_padding(thread_info)
+
         ### Reporting newish and modified variables: ##########################
         #                                                                     #
         old_local_reprs = self.frame_to_local_reprs.get(frame, {})
         self.frame_to_local_reprs[frame] = local_reprs = \
-                                       get_local_reprs(frame, watch=self.watch, custom_repr=self.custom_repr)
+                                       get_local_reprs(frame,
+                                                       watch=self.watch, custom_repr=self.custom_repr,
+                                                       max_length=self.max_variable_length,
+                                                       normalize=self.normalize,
+                                                       )
 
         newish_string = ('Starting var:.. ' if event == 'call' else
                                                             'New var:....... ')
@@ -332,15 +432,6 @@ class Tracer:
         #                                                                     #
         ### Finished newish and modified variables. ###########################
 
-        now_string = datetime_module.datetime.now().time().isoformat()
-        line_no = frame.f_lineno
-        source_line = get_source_from_frame(frame)[line_no - 1]
-        thread_info = ""
-        if self.thread_info:
-            current_thread = threading.current_thread()
-            thread_info = "{ident}-{name} ".format(
-                ident=current_thread.ident, name=current_thread.getName())
-        thread_info = self.set_thread_info_padding(thread_info)
 
         ### Dealing with misplaced function definition: #######################
         #                                                                     #
@@ -349,8 +440,7 @@ class Tracer:
             # function definition is found.
             for candidate_line_no in itertools.count(line_no):
                 try:
-                    candidate_source_line = \
-                            get_source_from_frame(frame)[candidate_line_no - 1]
+                    candidate_source_line = source[candidate_line_no - 1]
                 except IndexError:
                     # End of source file reached without finding a function
                     # definition. Fall back to original source line.
@@ -381,22 +471,28 @@ class Tracer:
             self.write('{indent}Call ended by exception'.
                        format(**locals()))
         else:
-            self.write(u'{indent}{now_string} {thread_info}{event:9} '
+            self.write(u'{indent}{timestamp} {thread_info}{event:9} '
                        u'{line_no:4} {source_line}'.format(**locals()))
 
         if event == 'return':
-            del self.frame_to_local_reprs[frame]
+            self.frame_to_local_reprs.pop(frame, None)
+            self.start_times.pop(frame, None)
             thread_global.depth -= 1
 
             if not ended_by_exception:
-                return_value_repr = utils.get_shortish_repr(arg, custom_repr=self.custom_repr)
+                return_value_repr = utils.get_shortish_repr(arg,
+                                                            custom_repr=self.custom_repr,
+                                                            max_length=self.max_variable_length,
+                                                            normalize=self.normalize,
+                                                            )
                 self.write('{indent}Return value:.. {return_value_repr}'.
                            format(**locals()))
 
         if event == 'exception':
             exception = '\n'.join(traceback.format_exception_only(*arg[:2])).strip()
-            exception = utils.truncate(exception, utils.MAX_EXCEPTION_LENGTH)
-            self.write('{indent}{exception}'.
+            if self.max_variable_length:
+                exception = utils.truncate(exception, self.max_variable_length)
+            self.write('{indent}Exception:..... {exception}'.
                        format(**locals()))
 
         return self.trace

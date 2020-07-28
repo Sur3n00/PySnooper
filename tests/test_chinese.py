@@ -9,7 +9,6 @@ import types
 import sys
 
 from pysnooper.utils import truncate
-from python_toolbox import sys_tools, temp_file_tools
 import pytest
 
 import pysnooper
@@ -17,12 +16,15 @@ from pysnooper import pycompat
 from pysnooper.variables import needs_parentheses
 from .utils import (assert_output, assert_sample_output, VariableEntry,
                     CallEntry, LineEntry, ReturnEntry, OpcodeEntry,
-                    ReturnValueEntry, ExceptionEntry)
+                    ReturnValueEntry, ExceptionEntry, ExceptionValueEntry,
+                    SourcePathEntry, CallEndedByExceptionEntry,
+                    ElapsedTimeEntry)
+from . import mini_toolbox
 
 
 
 def test_chinese():
-    with temp_file_tools.create_temp_folder(prefix='pysnooper') as folder:
+    with mini_toolbox.create_temp_folder(prefix='pysnooper') as folder:
         path = folder / 'foo.log'
         @pysnooper.snoop(path)
         def foo():
@@ -36,6 +38,7 @@ def test_chinese():
         assert_output(
             output,
             (
+                SourcePathEntry(),
                 CallEntry(),
                 LineEntry(),
                 VariableEntry('a'),
@@ -43,6 +46,7 @@ def test_chinese():
                 VariableEntry(u'x', (u"'失败'" if pycompat.PY3 else None)),
                 LineEntry(),
                 ReturnEntry(),
-                ReturnValueEntry('7')
+                ReturnValueEntry('7'),
+                ElapsedTimeEntry(),
             ),
         )

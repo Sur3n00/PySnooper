@@ -2,12 +2,10 @@
 # This program is distributed under the MIT license.
 
 import abc
+import re
 
 import sys
-from .pycompat import ABC, string_types
-
-MAX_VARIABLE_LENGTH = 100
-MAX_EXCEPTION_LENGTH = 200
+from .pycompat import ABC, string_types, collections_abc
 
 def _check_methods(C, *methods):
     mro = C.__mro__
@@ -58,29 +56,43 @@ def get_repr_function(item, custom_repr):
     return repr
 
 
-def get_shortish_repr(item, custom_repr=()):
+DEFAULT_REPR_RE = re.compile(r' at 0x[a-f0-9A-F]{4,}')
+
+
+def normalize_repr(item_repr):
+    """Remove memory address (0x...) from a default python repr"""
+    return DEFAULT_REPR_RE.sub('', item_repr)
+
+
+def get_shortish_repr(item, custom_repr=(), max_length=None, normalize=False):
     repr_function = get_repr_function(item, custom_repr)
     try:
         r = repr_function(item)
     except Exception:
         r = 'REPR FAILED'
     r = r.replace('\r', '').replace('\n', '')
-    r = truncate(r, MAX_VARIABLE_LENGTH)
+    if normalize:
+        r = normalize_repr(r)
+    if max_length:
+        r = truncate(r, max_length)
     return r
 
 
 def truncate(string, max_length):
-    if len(string) > max_length:
+    if (max_length is None) or (len(string) <= max_length):
+        return string
+    else:
         left = (max_length - 3) // 2
         right = max_length - 3 - left
-        string = u'{}...{}'.format(string[:left], string[-right:])
-    return string
+        return u'{}...{}'.format(string[:left], string[-right:])
 
 
 def ensure_tuple(x):
-    if isinstance(x, string_types):
-        x = (x,)
-    return tuple(x)
+    if isinstance(x, collections_abc.Iterable) and \
+                                               not isinstance(x, string_types):
+        return tuple(x)
+    else:
+        return (x,)
 
 
 

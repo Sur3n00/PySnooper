@@ -1,16 +1,18 @@
 # Copyright 2019 Ram Rachum and collaborators.
 # This program is distributed under the MIT license.
-
+import os
 import re
 import abc
 import inspect
+
+from pysnooper.utils import DEFAULT_REPR_RE
 
 try:
     from itertools import zip_longest
 except ImportError:
     from itertools import izip_longest as zip_longest
 
-from python_toolbox import caching, sys_tools
+from . import mini_toolbox
 
 import pysnooper.pycompat
 
@@ -73,6 +75,43 @@ class _BaseValueEntry(_BaseEntry):
         _, preamble, content = match.groups()
         return (self._check_preamble(preamble) and
                                                   self._check_content(content))
+
+
+class ElapsedTimeEntry(_BaseEntry):
+    def __init__(self, elapsed_time_value=None, tolerance=0.2, prefix=''):
+        _BaseEntry.__init__(self, prefix=prefix)
+        self.line_pattern = re.compile(
+            r"""^%s(?P<indent>(?: {4})*)Elapsed time: (?P<time>.*)""" % (
+                re.escape(self.prefix),
+            )
+        )
+        self.elapsed_time_value = elapsed_time_value
+        self.tolerance = tolerance
+
+    def check(self, s):
+        match = self.line_pattern.match(s)
+        if not match:
+            return False
+        timedelta = pysnooper.pycompat.timedelta_parse(match.group('time'))
+        if self.elapsed_time_value:
+            return abs(timedelta.total_seconds() - self.elapsed_time_value) \
+                                                              <= self.tolerance
+        else:
+            return True
+
+
+
+class CallEndedByExceptionEntry(_BaseEntry):
+    # Todo: Looking at this class, we could rework the hierarchy.
+    def __init__(self, prefix=''):
+        _BaseEntry.__init__(self, prefix=prefix)
+
+    def check(self, s):
+        return re.match(
+            r'''(?P<indent>(?: {4})*)Call ended by exception''',
+            s
+        )
+
 
 
 class VariableEntry(_BaseValueEntry):
@@ -139,7 +178,7 @@ class VariableEntry(_BaseValueEntry):
             return stage == self.stage
 
 
-class ReturnValueEntry(_BaseValueEntry):
+class _BaseSimpleValueEntry(_BaseValueEntry):
     def __init__(self, value=None, value_regex=None, prefix=''):
         _BaseValueEntry.__init__(self, prefix=prefix)
         if value is not None:
@@ -148,10 +187,6 @@ class ReturnValueEntry(_BaseValueEntry):
         self.value = value
         self.value_regex = (None if value_regex is None else
                             re.compile(value_regex))
-
-    _preamble_pattern = re.compile(
-        r"""^Return value$"""
-    )
 
     def _check_preamble(self, preamble):
         return bool(self._preamble_pattern.match(preamble))
@@ -167,6 +202,41 @@ class ReturnValueEntry(_BaseValueEntry):
         else:
             return True
 
+class ReturnValueEntry(_BaseSimpleValueEntry):
+    _preamble_pattern = re.compile(
+        r"""^Return value$"""
+    )
+
+class ExceptionValueEntry(_BaseSimpleValueEntry):
+    _preamble_pattern = re.compile(
+        r"""^Exception$"""
+    )
+
+class SourcePathEntry(_BaseValueEntry):
+    def __init__(self, source_path=None, source_path_regex=None, prefix=''):
+        _BaseValueEntry.__init__(self, prefix=prefix)
+        if source_path is not None:
+            assert source_path_regex is None
+
+        self.source_path = source_path
+        self.source_path_regex = (None if source_path_regex is None else
+                            re.compile(source_path_regex))
+
+    _preamble_pattern = re.compile(
+        r"""^Source path$"""
+    )
+
+    def _check_preamble(self, preamble):
+        return bool(self._preamble_pattern.match(preamble))
+
+    def _check_content(self, source_path):
+        if self.source_path is not None:
+            return source_path == self.source_path
+        elif self.source_path_regex is not None:
+            return self.source_path_regex.match(source_path)
+        else:
+            return True
+
 
 class _BaseEventEntry(_BaseEntry):
     def __init__(self, source=None, source_regex=None, thread_info=None,
@@ -177,7 +247,7 @@ class _BaseEventEntry(_BaseEntry):
         if source is not None:
             assert source_regex is None
         self.line_pattern = re.compile(
-            r"""^%s(?P<indent>(?: {4})*)[0-9:.]{15} """
+            r"""^%s(?P<indent>(?: {4})*)(?:(?:[0-9:.]{15})|(?: {15})) """
             r"""(?P<thread_info>[0-9]+-[0-9A-Za-z_-]+[ ]+)?"""
             r"""(?P<event_name>[a-z_]*) +(?P<line_number>[0-9]*) """
             r"""+(?P<source>.*)$""" % (re.escape(self.prefix,))
@@ -190,7 +260,7 @@ class _BaseEventEntry(_BaseEntry):
         self.thread_info_regex = (None if thread_info_regex is None else
                              re.compile(thread_info_regex))
 
-    @caching.CachedProperty
+    @property
     def event_name(self):
         return re.match('^[A-Z][a-z_]*', type(self).__name__).group(0).lower()
 
@@ -244,13 +314,36 @@ class OutputFailure(Exception):
     pass
 
 
-def assert_output(output, expected_entries, prefix=None):
+def verify_normalize(lines, prefix):
+    time_re = re.compile(r"[0-9:.]{15}")
+    src_re = re.compile(r'^(?: *)Source path:\.\.\. (.*)$')
+    for line in lines:
+        if DEFAULT_REPR_RE.search(line):
+            msg = "normalize is active, memory address should not appear"
+            raise OutputFailure(line, msg)
+        no_prefix = line.replace(prefix if prefix else '', '').strip()
+        if time_re.match(no_prefix):
+            msg = "normalize is active, time should not appear"
+            raise OutputFailure(line, msg)
+        m = src_re.match(line)
+        if m:
+            if not os.path.basename(m.group(1)) == m.group(1):
+                msg = "normalize is active, path should be only basename"
+                raise OutputFailure(line, msg)
+
+
+def assert_output(output, expected_entries, prefix=None, normalize=False):
     lines = tuple(filter(None, output.split('\n')))
+    if expected_entries and not lines:
+        raise OutputFailure("Output is empty")
 
     if prefix is not None:
         for line in lines:
             if not line.startswith(prefix):
                 raise OutputFailure(line)
+
+    if normalize:
+        verify_normalize(lines, prefix)
 
     any_mismatch = False
     result = ''
@@ -270,15 +363,23 @@ def assert_output(output, expected_entries, prefix=None):
 
 
 def assert_sample_output(module):
-    with sys_tools.OutputCapturer(stdout=False,
-                                  stderr=True) as output_capturer:
+    with mini_toolbox.OutputCapturer(stdout=False,
+                                     stderr=True) as output_capturer:
         module.main()
 
-    time = '21:10:42.298924'
-    time_pattern = re.sub(r'\d', r'\\d', time)
+    placeholder_time = '00:00:00.000000'
+    time_pattern = '[0-9:.]{15}'
 
     def normalise(out):
-        return re.sub(time_pattern, time, out).strip()
+        out = re.sub(time_pattern, placeholder_time, out).strip()
+        out = re.sub(
+            r'^( *)Source path:\.\.\. .*$',
+            r'\1Source path:... Whatever',
+            out,
+            flags=re.MULTILINE
+        )
+        return out
+
 
     output = output_capturer.string_io.getvalue()
 
@@ -290,3 +391,5 @@ def assert_sample_output(module):
     except AssertionError:
         print('\n\nActual Output:\n\n' + output)  # to copy paste into expected_output
         raise  # show pytest diff (may need -vv flag to see in full)
+
+

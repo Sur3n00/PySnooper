@@ -1,7 +1,5 @@
 # PySnooper - Never use print for debugging again #
 
-[![Travis CI](https://img.shields.io/travis/cool-RR/PySnooper/master.svg)](https://travis-ci.org/cool-RR/PySnooper)
-
 **PySnooper** is a poor man's debugger.
 
 You're trying to figure out why your Python code isn't doing what you think it should be doing. You'd love to use a full-fledged debugger with breakpoints and watches, but you can't be bothered to set one up right now.
@@ -37,6 +35,7 @@ number_to_bits(6)
 The output to stderr is:
 
 ```
+Source path:... /my_code/foo.py
 Starting var:.. number = 6
 15:29:11.327032 call         4 def number_to_bits(number):
 15:29:11.327032 line         5     if number:
@@ -63,6 +62,7 @@ Modified var:.. bits = [1, 1, 0]
 15:29:11.327032 line        10         return bits
 15:29:11.327032 return      10         return bits
 Return value:.. [1, 1, 0]
+Elapsed time: 00:00:00.000001
 ```
 
 Or if you don't want to trace an entire function, you can wrap the relevant part in a `with` block:
@@ -98,6 +98,7 @@ New var:....... upper = 832
 74 453.0 832
 New var:....... mid = 453.0
 09:37:35.882486 line        13         print(lower, mid, upper)
+Elapsed time: 00:00:00.000344
 ```
 
 # Features #
@@ -116,136 +117,37 @@ See values of some expressions that aren't local variables:
 @pysnooper.snoop(watch=('foo.bar', 'self.x["whatever"]'))
 ```
 
-Expand values to see all their attributes or items of lists/dictionaries:
-
-```python
-@pysnooper.snoop(watch_explode=('foo', 'self'))
-```
-
-This will output lines like:
-
-```
-Modified var:.. foo[2] = 'whatever'
-New var:....... self.baz = 8
-```
-
-(see [Advanced Usage](#advanced-usage) for more control)
-
 Show snoop lines for functions that your function calls:
 
 ```python
 @pysnooper.snoop(depth=2)
 ```
 
-Start all snoop lines with a prefix, to grep for them easily:
+**See [Advanced Usage](https://github.com/cool-RR/PySnooper/blob/master/ADVANCED_USAGE.md) for more options.** <------
 
-```python
-@pysnooper.snoop(prefix='ZZZ ')
-```
 
-On multi-threaded apps identify which thread are snooped in output:
+# Installation with Pip #
 
-```python
-@pysnooper.snoop(thread_info=True)
-```
+The best way to install **PySnooper** is with Pip:
 
-PySnooper supports decorating generators.
-
-You can also customize the repr of an object:
-
-```python
-def large(l):
-    return isinstance(l, list) and len(l) > 5
-
-def print_list_size(l):
-    return 'list(size={})'.format(len(l))
-
-def print_ndarray(a):
-    return 'ndarray(shape={}, dtype={})'.format(a.shape, a.dtype)
-
-@pysnooper.snoop(custom_repr=((large, print_list_size), (numpy.ndarray, print_ndarray)))
-def sum_to_x(x):
-    l = list(range(x))
-    a = numpy.zeros((10,10))
-    return sum(l)
-
-sum_to_x(10000)
-```
-
-You will get `l = list(size=10000)` for the list, and `a = ndarray(shape=(10, 10), dtype=float64)` for the ndarray.
-The `custom_repr` are matched in order, if one condition matches, no further conditions will be checked.
-
-# Installation #
-
-You can install **PySnooper** by:
-
-* pip:
 ```console
 $ pip install pysnooper
 ```
 
-* conda with conda-forge channel:
+# Other installation options #
+
+Conda with conda-forge channel:
+
 ```console
 $ conda install -c conda-forge pysnooper
 ```
 
-# Advanced Usage #
-
-`watch_explode` will automatically guess how to expand the expression passed to it based on its class. You can be more specific by using one of the following classes:
-
-```python
-import pysnooper
-
-@pysnooper.snoop(watch=(
-    pysnooper.Attrs('x'),    # attributes
-    pysnooper.Keys('y'),     # mapping (e.g. dict) items
-    pysnooper.Indices('z'),  # sequence (e.g. list/tuple) items
-))
-```
-
-Exclude specific keys/attributes/indices with the `exclude` parameter, e.g. `Attrs('x', exclude=('_foo', '_bar'))`.
-
-Add a slice after `Indices` to only see the values within that slice, e.g. `Indices('z')[-3:]`.
-
-# Contribute #
-
-[Pull requests](https://github.com/cool-RR/PySnooper/pulls) are always welcome!
-Please, write tests and run them with [Tox](https://tox.readthedocs.io/).
-
-Tox installs all dependencies automatically. You only need to install Tox itself:
+Arch Linux:
 
 ```console
-$ pip install tox
+$ yay -S python-pysnooper
 ```
 
-List all environments `tox` would run:
-
-```console
-$ tox -lv
-```
-
-If you want to run tests against all target Python versions use [pyenv](
-https://github.com/pyenv/pyenv) to install them. Otherwise, you can run
-only linters and the ones you have already installed on your machine:
-
-```console
-# run only some environments
-$ tox -e flake8,pylint,bandit,py27,py36
-```
-
-Or just install project in developer mode with test dependencies:
-
-``` bash
-$ pip install -e path/to/PySnooper[tests]
-```
-
-And run tests:
-
-``` bash
-$ pytest
-```
-
-Tests should pass before you push your code. They will be run again on Travis CI.
 
 # License #
 
